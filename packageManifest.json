@@ -1,0 +1,18 @@
+{
+    "packageName":"Controlart - Ethernet Relay Module",
+    "author":"TRATO",
+    "version":"1.0",
+    "minimumHEVersion":"2.3.7.100",
+    "dateReleased":"2024-05-22",
+    "releaseNotes":"First version pushed to HPM",
+    "documentationLink":"https://github.com/hhorigian/Controlart_Relays",
+    "drivers": [
+     {
+        "id":"d9ddf17b-ef05-4f2c-96fb-9fd14b9d641c",
+        "name":"Controlart - Ethernet Relay Module",
+        "namespace":"TRATO",
+        "location":"https://raw.githubusercontent.com/hhorigian/Controlart_Relays/main/Hubitat_ControlArt_Ethernet_Relay_Module_Driver.groovy",
+        "required":true
+     }
+     ]
+   }
