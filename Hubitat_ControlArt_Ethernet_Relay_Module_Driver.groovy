@@ -59,11 +59,11 @@ command "getstatus"
 
 def installed() {
     logTrace('installed()')
-    updated()
     def novaprimeira = ""
     def oldprimeira = ""
+    state.childscreated = 0
     runIn(1800, logsOff)
-    childscreated = 0
+
 
 }
 
@@ -75,8 +75,8 @@ def uninstalled() {
 
 def updated() {
     logTrace('updated()')
-    initialize()
-    refresh()
+    //initialize()
+    //refresh()
 }
 
 def configure() {
@@ -89,11 +89,11 @@ def configure() {
 def keepalive() {
     logTrace('keepalive()')
     unschedule()
+    state.clear()
     interfaces.rawSocket.close();
-    state.clear()    
+    state.childscreated = 1
     lastprimeira = ""
     primeira = ""
-    childscreated = 1
     
     try {
         logTrace("tentando conexão com o device no ${device_IP_address}...na porta ${device_port}");
@@ -101,16 +101,16 @@ def keepalive() {
         interfaces.rawSocket.connect(device_IP_address, (int) device_port);
         state.lastMessageReceivedAt = now();
         getmac()
-        pauseExecution(200)
+        pauseExecution(500)
         getstatus()
-        runEvery5Minutes(getstatus)
+        //runEvery5Minutes(getstatus)
         runIn(checkInterval, "connectionCheck");
         //refresh();  // se estava offline, preciso fazer um refresh
     }
     catch (e) {
          logError( "${device_IP_address} keepalive error: ${e.message}" )
          sendEvent(name: "boardstatus", value: "offline", isStateChange: true)        
-         runIn(5, "keepalive");
+         //runIn(5, "keepalive");
     }
     
     
@@ -144,20 +144,25 @@ def initialize() {
         interfaces.rawSocket.connect(device_IP_address, (int) device_port);
         state.lastMessageReceivedAt = now();
         getmac()
-        runIn(1, "getstatus");
+        pauseExecution(200)
+        getstatus()
+        //runEvery5Minutes(getstatus)
         runIn(checkInterval, "connectionCheck");
         //refresh();  // se estava offline, preciso fazer um refresh
     }
     catch (e) {
          logError( "${device_IP_address} initialize error: ${e.message}" )
          sendEvent(name: "boardstatus", value: "offline", isStateChange: true)        
-
-        runIn(60, "initialize");
+         //runIn(2, "initialize");
     }
     
-    if (childscreated == 0) {
-        createchilds() 
-    }
+     //CREATE CHILDS
+     
+   // if (state.childscreated == 0) {
+       
+        createchilds()    
+    
+   // }
  
 }
 
@@ -166,7 +171,7 @@ def createchilds() {
     state.inputcount = 12
     state.outputcount = 10    
     String thisId = device.id
-	log.info "info thisid " + thisId
+	log.info "Creating Childs. Info thisid =  " + thisId
 	def cd = getChildDevice("${thisId}-Switch")
     state.netids = "${thisId}-Switch-"
 	if (!cd) {
@@ -174,10 +179,10 @@ def createchilds() {
         for(int i = 1; i<=state.outputcount; i++) {        
         cd = addChildDevice("hubitat", "Generic Component Switch", "${thisId}-Switch-" + Integer.toString(i), [name: "${device.displayName} Switch-" + Integer.toString(i) , isComponent: true])
         log.info "added switch # " + i + " from " + state.outputcount            
-        
-    }
+       
+        }
     }  
-    childscreated = 1
+    state.childscreated == 1
 }
 
 def getstatus()
@@ -186,7 +191,7 @@ def getstatus()
     def msg = "mdcmd_getmd," + state.macaddress
     //def msg = "mdcmd_getmd," + state.macaddress + "\r\n"
     sendCommand(msg)
-    //sendCommand(msg)
+
     
 }
 
@@ -248,14 +253,17 @@ def parse(msg) {
 
     //macadress
     if (newmsg2.contains("macaddr")){
+        //log.info "mac completa = " + newmsg2
         def mac = newmsg2
-        def newmac = (mac.substring(10)); 
+        newmac = (mac.substring(10)); 
         newmac = (newmac.replaceAll(",","0x")); 
         newmac = (newmac.replaceAll("-",",0x")); 
         newmac = newmac.replaceAll("\\s","")
 
+                
+        log.info "macaddress =  " + newmac 
         state.macaddress = newmac
-        log.info "MAC " + newmac 
+
         sendEvent(name: "boardstatus", value: "online")
     }
     
@@ -272,6 +280,7 @@ def parse(msg) {
         state.inputs  = varinputs
         varoutputs = newmsg2[24..44]
         varoutputs =  varoutputs.replaceAll(",","")
+        
         state.outputs =  varoutputs
         novaprimeira = varoutputs
         state.primeira = novaprimeira
