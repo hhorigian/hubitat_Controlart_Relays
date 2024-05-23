@@ -13,6 +13,7 @@
  *  for the specific language governing permissions and limitations under the License.
  *
  *        1.0 22/5/2024  - V.BETA 1 
+ *        1.1 22/5/2024  - Added check connection time every 5min. 
  */
 metadata {
   definition (name: "Controlart - Ethernet Relay Module", namespace: "TRATO", author: "TRATO", vid: "generic-contact") { 
@@ -27,8 +28,8 @@ metadata {
 
 import groovy.json.JsonSlurper
 import groovy.transform.Field
-command "buscainputcount"
-command "createchilds"
+
+command "keepalive"
 command "getfw"
 command "getmac"
 command "getstatus"
@@ -62,6 +63,8 @@ def installed() {
     def novaprimeira = ""
     def oldprimeira = ""
     runIn(1800, logsOff)
+    childscreated = 0
+
 }
 
 def uninstalled() {
@@ -83,6 +86,35 @@ def configure() {
     unschedule()
 }
 
+def keepalive() {
+    logTrace('keepalive()')
+    unschedule()
+    interfaces.rawSocket.close();
+    state.clear()    
+    lastprimeira = ""
+    primeira = ""
+    childscreated = 1
+    
+    try {
+        logTrace("tentando conexão com o device no ${device_IP_address}...na porta ${device_port}");
+        int i = 4998
+        interfaces.rawSocket.connect(device_IP_address, (int) device_port);
+        state.lastMessageReceivedAt = now();
+        getmac()
+        pauseExecution(200)
+        getstatus()
+        runEvery5Minutes(getstatus)
+        runIn(checkInterval, "connectionCheck");
+        //refresh();  // se estava offline, preciso fazer um refresh
+    }
+    catch (e) {
+         logError( "${device_IP_address} keepalive error: ${e.message}" )
+         sendEvent(name: "boardstatus", value: "offline", isStateChange: true)        
+         runIn(5, "keepalive");
+    }
+    
+    
+}
 
 
 def initialize() {
@@ -104,7 +136,7 @@ def initialize() {
         return
     }
     //Llama la busca de count de inputs+outputs
-
+    
     
     try {
         logTrace("tentando conexão com o device no ${device_IP_address}...na porta ${device_port}");
@@ -112,18 +144,21 @@ def initialize() {
         interfaces.rawSocket.connect(device_IP_address, (int) device_port);
         state.lastMessageReceivedAt = now();
         getmac()
-        runIn(15, "getstatus");
+        runIn(1, "getstatus");
         runIn(checkInterval, "connectionCheck");
-        refresh();  // se estava offline, preciso fazer um refresh
+        //refresh();  // se estava offline, preciso fazer um refresh
     }
     catch (e) {
-        logError( "${device_IP_address} initialize error: ${e.message}" )
+         logError( "${device_IP_address} initialize error: ${e.message}" )
          sendEvent(name: "boardstatus", value: "offline", isStateChange: true)        
 
         runIn(60, "initialize");
     }
-    createchilds()
-       
+    
+    if (childscreated == 0) {
+        createchilds() 
+    }
+ 
 }
 
 
@@ -141,7 +176,8 @@ def createchilds() {
         log.info "added switch # " + i + " from " + state.outputcount            
         
     }
-    }         
+    }  
+    childscreated = 1
 }
 
 def getstatus()
@@ -186,6 +222,7 @@ def refresh() {
     }
     return cd 
 }
+
 
 
 def parse(msg) {
@@ -348,25 +385,15 @@ def connectionCheck() {
     
     if ( now - state.lastMessageReceivedAt > (checkInterval * 1000)) { 
         logError("sem mensagens desde ${(now - state.lastMessageReceivedAt)/60000} minutos, reconectando ...");
-        initialize();
+        keepalive();
     }
-    else {
-        logDebug("connectionCheck ok");
-         sendEvent(name: "boardstatus", value: "online")
+    else if (state.lastmessage.contains("ParseError")){
+        logError("Problemas no último Parse, reconectando ...");
+        keepalive();
+    } else {       
+        logDebug("ConnectionCheck ok");
+        sendEvent(name: "boardstatus", value: "online")
         runIn(checkInterval, "connectionCheck");
-    }
-}
-
-def socketStatus(String message) {
-    if (message == "receive error: String index out of range: -1") {
-        // This is some error condition that repeats every 15ms.
-
-        interfaces.rawSocket.close();       
-        logError( "socketStatus: ${message}");
-        logError( "Closing connection to device" );
-    }
-    else if (message != "receive error: Read timed out") {
-        logError( "socketStatus: ${message}")
     }
 }
 
