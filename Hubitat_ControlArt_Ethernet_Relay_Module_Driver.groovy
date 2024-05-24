@@ -14,6 +14,7 @@
  *
  *        1.0 22/5/2024  - V.BETA 1 
  *        1.1 22/5/2024  - Added check connection time every 5min. 
+ *        1.2 24/5/2024  - Fixed bugs. Added Relay numbers. Changed Initialize, Configure, connection.
  */
 metadata {
   definition (name: "Controlart - Ethernet Relay Module", namespace: "TRATO", author: "TRATO", vid: "generic-contact") { 
