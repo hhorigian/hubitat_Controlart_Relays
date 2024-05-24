@@ -33,6 +33,8 @@ command "keepalive"
 command "getfw"
 command "getmac"
 command "getstatus"
+command "reconnect"
+command "cleanup"
 
   preferences {
         input "device_IP_address", "text", title: "IP Address of Device", required: true, defaultValue: "192.168"   
@@ -62,6 +64,8 @@ def installed() {
     def novaprimeira = ""
     def oldprimeira = ""
     state.childscreated = 0
+    state.inputcount = 12
+    state.outputcount = 10      
     runIn(1800, logsOff)
 
 
@@ -86,23 +90,26 @@ def configure() {
     unschedule()
 }
 
-def keepalive() {
-    logTrace('keepalive()')
-    unschedule()
+def cleanup (){
+ 
     state.clear()
-    interfaces.rawSocket.close();
-    state.childscreated = 1
-    lastprimeira = ""
-    primeira = ""
     
+}
+
+
+def reconnect () {
+    interfaces.rawSocket.close();
+    state.lastMessageReceived = ""
+    state.lastmessage = ""
+    state.macaddress = ""
+    state.lastprimeira = ""
+    state.primeira = ""
+
     try {
         logTrace("tentando conexão com o device no ${device_IP_address}...na porta ${device_port}");
         int i = 4998
         interfaces.rawSocket.connect(device_IP_address, (int) device_port);
         state.lastMessageReceivedAt = now();
-        getmac()
-        pauseExecution(500)
-        getstatus()
         //runEvery5Minutes(getstatus)
         runIn(checkInterval, "connectionCheck");
         //refresh();  // se estava offline, preciso fazer um refresh
@@ -112,7 +119,46 @@ def keepalive() {
          sendEvent(name: "boardstatus", value: "offline", isStateChange: true)        
          //runIn(5, "keepalive");
     }
+    pauseExecution(500)    
+    getmac()
     
+}
+    
+
+
+
+def keepalive() {
+    logTrace('keepalive()')
+    unschedule()
+    state.lastMessageReceived = ""
+    state.lastmessage = ""
+    state.macaddress = ""
+    state.lastprimeira = ""
+    state.primeira = ""
+    interfaces.rawSocket.close();
+    
+    state.childscreated = 1
+    state.inputcount = 12
+    state.outputcount = 10        
+    String thisId = device.id
+    state.netids = "${thisId}-Switch-"
+  
+    try {
+        logTrace("tentando conexão com o device no ${device_IP_address}...na porta ${device_port}");
+        int i = 4998
+        interfaces.rawSocket.connect(device_IP_address, (int) device_port);
+        state.lastMessageReceivedAt = now();
+        //runEvery5Minutes(getstatus)
+        runIn(checkInterval, "connectionCheck");
+        //refresh();  // se estava offline, preciso fazer um refresh
+    }
+    catch (e) {
+         logError( "${device_IP_address} keepalive error: ${e.message}" )
+         sendEvent(name: "boardstatus", value: "offline", isStateChange: true)        
+         //runIn(5, "keepalive");
+    }
+    pauseExecution(500)    
+    getmac()
     
 }
 
@@ -121,11 +167,18 @@ def initialize() {
     logTrace('initialize()')
     unschedule()
     interfaces.rawSocket.close();
-    state.clear()
-    def novaprimeira = ""
-    def oldprimeira = ""
-    partialMessage = '';
-
+    state.lastMessageReceived = ""
+    state.lastmessage = ""
+    state.macaddress = ""
+    state.inputs = ""
+    state.outputs = "" 
+    state.inputcount = 12
+    state.outputcount = 10  
+    state.lastprimeira = ""
+    state.primeira = ""    
+    String thisId = device.id
+    state.netids = "${thisId}-Switch-"    
+    
     if (!device_IP_address) {
         logError 'IP do Device not configured'
         return
@@ -135,17 +188,13 @@ def initialize() {
         logError 'Porta do Device não configurada.'
         return
     }
-    //Llama la busca de count de inputs+outputs
     
     
     try {
-        logTrace("tentando conexão com o device no ${device_IP_address}...na porta ${device_port}");
+        logTrace("Start conexão com o device no ${device_IP_address}...na porta ${device_port}");
         int i = 4998
         interfaces.rawSocket.connect(device_IP_address, (int) device_port);
         state.lastMessageReceivedAt = now();
-        getmac()
-        pauseExecution(200)
-        getstatus()
         //runEvery5Minutes(getstatus)
         runIn(checkInterval, "connectionCheck");
         //refresh();  // se estava offline, preciso fazer um refresh
@@ -155,25 +204,31 @@ def initialize() {
          sendEvent(name: "boardstatus", value: "offline", isStateChange: true)        
          //runIn(2, "initialize");
     }
-    
+        pauseExecution(100)
+        getmac()
+        pauseExecution(200)
      //CREATE CHILDS
-     
-   // if (state.childscreated == 0) {
-       
+        
+    if (state.childscreated != 1)
+    {
         createchilds()    
     
-   // }
+    }
+    
+        pauseExecution(200)
+        getstatus()
+ 
  
 }
 
 
 def createchilds() {
-    state.inputcount = 12
-    state.outputcount = 10    
+
     String thisId = device.id
-	log.info "Creating Childs. Info thisid =  " + thisId
-	def cd = getChildDevice("${thisId}-Switch")
     state.netids = "${thisId}-Switch-"
+    
+    log.info "Creating Childs. Info thisid =  " + thisId
+	def cd = getChildDevice("${thisId}-Switch")
 	if (!cd) {
         log.info "outputcount = " + state.outputcount 
         for(int i = 1; i<=state.outputcount; i++) {        
@@ -187,9 +242,10 @@ def createchilds() {
 
 def getstatus()
 {
-   
+    getmac()
+    pauseExecution(500)
     def msg = "mdcmd_getmd," + state.macaddress
-    //def msg = "mdcmd_getmd," + state.macaddress + "\r\n"
+    logTrace('Sent getstatus()')
     sendCommand(msg)
 
     
@@ -199,6 +255,7 @@ def getstatus()
 def getmac(){
     def msg = "get_mac_addr" 
     //def msg = "get_mac_addr\r\n" 
+    logTrace('Sent getmac()')
     sendCommand(msg)
 
 }
@@ -206,12 +263,14 @@ def getmac(){
 def getfw()
 {
     def msg = "get_firmware_version\r\n"
+    logTrace('Sent getfw()')
     sendCommand(msg)
 
 }
 
 def refresh() {
-    def msg = "mdcmd_getmd," + state.macaddress 
+    def msg = "mdcmd_getmd," + state.macaddress
+    logTrace('Sent refresh()')   
     sendCommand(msg)
 }
 
@@ -234,6 +293,7 @@ def parse(msg) {
     state.lastMessageReceived = new Date(now()).toString();
     state.lastMessageReceivedAt = now();
     
+
     
     def oldmessage = state.lastmessage
 
@@ -243,7 +303,10 @@ def parse(msg) {
     
     
     state.lastmessage = newmsg2
-    
+    larguramsg = newmsg2.length()
+    state.larguramsg = larguramsg
+    log.info "qtde chars = " + larguramsg
+    log.info "lastmessage = " + newmsg2
     //firmware
     if (newmsg2.length() < 7) {
         state.firmware = newmsg2
@@ -254,14 +317,14 @@ def parse(msg) {
     //macadress
     if (newmsg2.contains("macaddr")){
         //log.info "mac completa = " + newmsg2
-        def mac = newmsg2
+        mac = newmsg2
         newmac = (mac.substring(10)); 
         newmac = (newmac.replaceAll(",","0x")); 
         newmac = (newmac.replaceAll("-",",0x")); 
         newmac = newmac.replaceAll("\\s","")
 
                 
-        log.info "macaddress =  " + newmac 
+        log.info "Got macaddress =  " + newmac 
         state.macaddress = newmac
 
         sendEvent(name: "boardstatus", value: "online")
@@ -300,7 +363,7 @@ def parse(msg) {
             def valold = oldprimeira[f]
             def diferenca = valold.compareToIgnoreCase(valprimeira)            
                 
-                log.info "valor valprimeira = " + valprimeira + " , valor valold = " + valold + " , valdiferenca = " + diferenca
+                //log.info "valor valprimeira = " + valprimeira + " , valor valold = " + valold + " , valdiferenca = " + diferenca
                 switch(diferenca) { 
                  case 0: 
                    log.info "no changes in ch#" + (f+1) ;
@@ -380,7 +443,7 @@ def off()
 
 
 private sendCommand(s) {
-    logDebug("sendCommand ${s}")
+    logDebug("sendingCommand ${s}")
     interfaces.rawSocket.sendMessage(s)    
 }
 
@@ -400,7 +463,7 @@ def connectionCheck() {
         logError("Problemas no último Parse, reconectando ...");
         keepalive();
     } else {       
-        logDebug("ConnectionCheck ok");
+        logDebug("Connection Check = ok - Board response. ");
         sendEvent(name: "boardstatus", value: "online")
         runIn(checkInterval, "connectionCheck");
     }
@@ -442,31 +505,39 @@ void componentOff(cd){
 ////// Driver Commands /////////
 
 
+
 //SEND ON COMMAND IN CHILD BUTTON
 void on(cd) {
 if (logEnable) log.debug "Turn device ON"	
 sendEvent(name: "switch", value: "on", isStateChange: true)
-//cd.updateDataValue("Power","On")    
-//cd.parse([[name:"switch", value:"on", descriptionText:"${cd.displayName} was turned on"]])
+
 
 ipdomodulo  = state.ipaddress
 lengthvar =  (cd.deviceNetworkId.length())
 int relay = 0
-if (lengthvar < 13) {
-    def numervalue1 = (cd.deviceNetworkId as String)[11]
+
+
+/// Inicio verificación del length    
+      substr1 = cd.deviceNetworkId.indexOf("-", cd.deviceNetworkId.indexOf("-") + 1);
+      def result01 = lengthvar - substr1 
+      if (result01 > 2  ) {
+           def  substr2a = substr1 + 1
+           def  substr2b = substr1 + 2
+           def substr3 = cd.deviceNetworkId[substr2a..substr2b]
+           numervalue1 = substr3
+          
+      }
+      else {
+          def substr3 = cd.deviceNetworkId[substr1+1]
+          numervalue1 = substr3
+        
+           }
+
     def valor = ""
     valor =   numervalue1 as Integer
-    relay = valor   
-    }
+    relay = valor-1   
 
-    else 
-   
-{
-    def numervalue2 = (cd.deviceNetworkId as String)[12] 
-    def valor = ""
-    valor =   numervalue2 as Integer
-    relay = valor 
-}
+ ////
      def stringrelay = relay
      def comando = "mdcmd_sendrele," +state.macaddress+ "," + stringrelay + ",1\r\n"
      interfaces.rawSocket.sendMessage(comando)
@@ -481,34 +552,42 @@ if (lengthvar < 13) {
 void off(cd) {
 if (logEnable) log.debug "Turn device OFF"	
 sendEvent(name: "switch", value: "off", isStateChange: true)
-cd.updateDataValue("Power","Off")
-//cd.parse([[name:"switch", value:"off", descriptionText:"${cd.displayName} was turned off"]])
+
     
 ipdomodulo  = state.ipaddress
 lengthvar =  (cd.deviceNetworkId.length())
 int relay = 0
-if (lengthvar < 13) {
-    def numervalue1 = (cd.deviceNetworkId as String)[11]
+
+/// Inicio verificación del length    
+      substr1 = cd.deviceNetworkId.indexOf("-", cd.deviceNetworkId.indexOf("-") + 1);
+      def result01 = lengthvar - substr1 
+      if (result01 > 2  ) {
+           def  substr2a = substr1 + 1
+           def  substr2b = substr1 + 2
+           def substr3 = cd.deviceNetworkId[substr2a..substr2b]
+           numervalue1 = substr3
+          
+      }
+      else {
+          def substr3 = cd.deviceNetworkId[substr1+1]
+          numervalue1 = substr3
+         
+           }
+
     def valor = ""
     valor =   numervalue1 as Integer
-    relay = valor   
-    }
+    relay = valor-1   
 
-    else 
-    
-{
-    def numervalue2 = (cd.deviceNetworkId as String)[12] 
-    def valor = ""
-    valor =   numervalue2 as Integer
-    relay = valor 
-}
-     def stringrelay = relay
+ ////
+     def stringrelay = relay   
      def comando = "mdcmd_sendrele," +state.macaddress+ "," + stringrelay + ",0\r\n"
      interfaces.rawSocket.sendMessage(comando)
      log.info "Foi Desligado o Relay " + relay + " via TCP " + comando 
      state.update = 1    //variable to control update with board on parse
     
 }
+
+
 
 
 
