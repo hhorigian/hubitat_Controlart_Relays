@@ -15,13 +15,15 @@
  *        1.0 22/5/2024  - V.BETA 1 
  *        1.1 22/5/2024  - Added check connection time every 5min. 
  *        1.2 24/5/2024  - Fixed bugs. Added Relay numbers. Changed Initialize, Configure, connection.
+ *        1.3 27/11/2024  - Fixed bugs. 
+ 
  */
 metadata {
   definition (name: "Controlart - Ethernet Relay Module", namespace: "TRATO", author: "TRATO", vid: "generic-contact") { 
         capability "Configuration"
         capability "Initialize" 
         capability "Refresh"
-        capability "Switch"       
+        capability "Switch"
       
   }
       
@@ -36,6 +38,7 @@ command "getmac"
 command "getstatus"
 command "reconnect"
 command "cleanup"
+command "connectionCheck"
 
   preferences {
         input "device_IP_address", "text", title: "IP Address of Device", required: true, defaultValue: "192.168"   
@@ -57,7 +60,7 @@ command "cleanup"
 
 
 @Field static String partialMessage = ''
-@Field static Integer checkInterval = 600
+@Field static Integer checkInterval = 60
 
 
 def installed() {
@@ -116,7 +119,7 @@ def reconnect () {
         //refresh();  // se estava offline, preciso fazer um refresh
     }
     catch (e) {
-         logError( "${device_IP_address} keepalive error: ${e.message}" )
+         logWarn( "${device_IP_address} keepalive error: ${e.message}" )
          sendEvent(name: "boardstatus", value: "offline", isStateChange: true)        
          //runIn(5, "keepalive");
     }
@@ -125,7 +128,6 @@ def reconnect () {
     
 }
     
-
 
 
 def keepalive() {
@@ -154,7 +156,7 @@ def keepalive() {
         //refresh();  // se estava offline, preciso fazer um refresh
     }
     catch (e) {
-         logError( "${device_IP_address} keepalive error: ${e.message}" )
+         logWarn( "${device_IP_address} keepalive error: ${e.message}" )
          sendEvent(name: "boardstatus", value: "offline", isStateChange: true)        
          //runIn(5, "keepalive");
     }
@@ -330,6 +332,11 @@ def parse(msg) {
 
         sendEvent(name: "boardstatus", value: "online")
     }
+
+    //parse-error treatment
+    if (newmsg2.contains("Parse Error!")){
+        keepalive()
+    }
     
     //getstatus
     if (newmsg2.contains("setcmd")){
@@ -455,13 +462,14 @@ private sendCommand(s) {
 
 def connectionCheck() {
     def now = now();
-    
+    logDebug("ConnectionCheck Running")
+
     if ( now - state.lastMessageReceivedAt > (checkInterval * 1000)) { 
-        logError("sem mensagens desde ${(now - state.lastMessageReceivedAt)/60000} minutos, reconectando ...");
+        logWarn("sem mensagens desde ${(now - state.lastMessageReceivedAt)/60000} minutos, reconectando ...");
         keepalive();
     }
     else if (state.lastmessage.contains("ParseError")){
-        logError("Problemas no último Parse, reconectando ...");
+        logWarn("Problemas no último Parse, reconectando ...");
         keepalive();
     } else {       
         logDebug("Connection Check = ok - Board response. ");
@@ -541,6 +549,9 @@ int relay = 0
  ////
      def stringrelay = relay
      def comando = "mdcmd_sendrele," +state.macaddress+ "," + stringrelay + ",1\r\n"
+     if (state.macaddress.length() < 2 == ""){
+        keepalive()
+     } 
      interfaces.rawSocket.sendMessage(comando)
      log.info "Foi Ligado o Relay " + relay + " via TCP " + comando 
      sendEvent(name: "power", value: "on")
@@ -582,6 +593,9 @@ int relay = 0
  ////
      def stringrelay = relay   
      def comando = "mdcmd_sendrele," +state.macaddress+ "," + stringrelay + ",0\r\n"
+     if (state.macaddress.length() < 2 == ""){
+        keepalive()
+     }      
      interfaces.rawSocket.sendMessage(comando)
      log.info "Foi Desligado o Relay " + relay + " via TCP " + comando 
      state.update = 1    //variable to control update with board on parse
