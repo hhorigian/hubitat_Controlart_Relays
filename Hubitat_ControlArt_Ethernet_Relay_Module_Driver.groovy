@@ -1,7 +1,7 @@
 /**
- *  Hubitat - CA Driver by TRATO
- *
- *  Copyright 2024 VH
+ *  Hubitat - Controlart Ethernet Relay Module (10 relés / 12 entradas)
+ *  
+ *  
  *
  *  Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
  *  in compliance with the License. You may obtain a copy of the License at:
@@ -11,650 +11,494 @@
  *  Unless required by applicable law or agreed to in writing, software distributed under the License is distributed
  *  on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License
  *  for the specific language governing permissions and limitations under the License.
- *
+ *  
+
  *        1.0 22/5/2024  - V.BETA 1 
  *        1.1 22/5/2024  - Added check connection time every 5min. 
  *        1.2 24/5/2024  - Fixed bugs. Added Relay numbers. Changed Initialize, Configure, connection.
- *        1.3 27/11/2024  - Fixed bugs. 
- 
+ *        1.3 27/11/2024  - Fixed bugs.
+ *  	  1.4 11/8/2025  - Keep output-suppression window after pulses, On pulse mode, also set contact to 'open' on falling edge (1->0) as a fallback, releaseInput() signature simplified to 'def releaseInput(data)' (compat Hubitat scheduler)
+ * 		  				- Read (PUSH button) event in board to create events from inputs. 
  */
-metadata {
-  definition (name: "Controlart - Ethernet Relay Module", namespace: "TRATO", author: "TRATO", vid: "generic-contact") { 
-        capability "Configuration"
-        capability "Initialize" 
-        capability "Refresh"
-        capability "Switch"
-      
-  }
-      
-  }
 
-import groovy.json.JsonSlurper
 import groovy.transform.Field
 
-command "keepalive"
-command "getfw"
-command "getmac"
-command "getstatus"
-command "reconnect"
-command "cleanup"
-command "connectionCheck"
+metadata {
+  definition (name: "Controlart - Ethernet Relay Module", namespace: "TRATO", author: "VH") {
+    capability "Configuration"
+    capability "Initialize"
+    capability "Refresh"
+    capability "Switch"
+    capability "PushableButton"
+
+    command "keepalive"
+    command "getfw"
+    command "getmac"
+    command "getstatus"
+    command "reconnect"
+    command "cleanup"
+
+    command "allOn"
+    command "allOff"
+    command "masterOn"
+    command "masterOff"
+
+    attribute "boardstatus", "string"
+    attribute "firmware", "string"
+    attribute "mac3_5", "string"
+  }
 
   preferences {
-        input "device_IP_address", "text", title: "IP Address of Device", required: true, defaultValue: "192.168"   
-        input "device_port", "number", title: "IP Port of Device", required: true, defaultValue: 4998
-        input name: "logEnable", type: "bool", title: "Enable debug logging", defaultValue: false
-        input name: "outputs", type: "string", title: "How many Relays " , defaultValue: 10
-        input name: "inputs", type: "string", title: "How many Inputs " , defaultValue: 12
-      
+    input "device_IP_address", "text", title: "IP Address of Board", required: true
+    input "device_port", "number", title: "IP Port of Board", required: true, defaultValue: 4998
 
-    input 'logInfo', 'bool', title: 'Show Info Logs?',  required: false, defaultValue: true
-    input 'logWarn', 'bool', title: 'Show Warning Logs?', required: false, defaultValue: true
-    input 'logDebug', 'bool', title: 'Show Debug Logs?', description: 'Only leave on when required', required: false, defaultValue: true
-    input 'logTrace', 'bool', title: 'Show Detailed Logs?', description: 'Only leave on when required', required: false, defaultValue: true
+    input "outputs", "number", title: "How many Relays (max 10)", defaultValue: 10
+    input "inputs", "number", title: "How many Inputs (max 12)", defaultValue: 12
 
-    //attribute "powerstatus", "string"
-    attribute "boardstatus", "string"
-      
-  }   
+    input "autoCreateChildren", "bool", title: "Auto-create child devices (Switch/Contact)", defaultValue: true
+    input "inputsPulseMode", "bool", title: "Inputs como Pulso (momentary)?", defaultValue: true
+    input "inputsAsButtons", "bool", title: "Emitir eventos de Botão (PushableButton) no Parent?", defaultValue: true
+    input "inputsCreateContactChildren", "bool", title: "Criar também childs Contact para inputs?", defaultValue: false
 
+    input "pulseReleaseMs", "number", title: "Tempo de retorno p/ 'open' (ms)", defaultValue: 150
+    input "pulseDebounceMs", "number", title: "Debounce do pulso (ms)", defaultValue: 50
+    input "suppressOutputsMs", "number", title: "Ignorar atualização de OUT após pulso (ms)", defaultValue: 250
 
-@Field static String partialMessage = ''
-@Field static Integer checkInterval = 60
+    input 'logInfo',  'bool', title: 'Show Info Logs?',  defaultValue: true
+    input 'logWarn',  'bool', title: 'Show Warning Logs?', defaultValue: true
+    input 'logDebug', 'bool', title: 'Show Debug Logs?', description: 'Only leave on when required', defaultValue: true
+    input 'logTrace', 'bool', title: 'Show Detailed Logs?', description: 'Only leave on when required', defaultValue: false
+  }
+}
 
+// ======== Constantes / Estado ========
+
+@Field static Integer checkInterval = 600
+@Field static String drvThis = "Controlart-Driver"
+
+@Field static String CRLF = "\r\n"
+@Field static String lineBuffer = ""
+@Field static String OUT_PREFIX = "Switch-"
+@Field static String IN_PREFIX  = "Input-"
+
+// ======== Helpers MAC ========
+
+private List<String> extractLast3HexBytes(String tail) {
+  if (!tail) return []
+  String cleaned = tail.replaceAll("[\\r\\n\\s]","")
+  cleaned = cleaned.replaceFirst("^[Mm][Aa][Cc][Aa][Dd][Dd][Rr][_ ,]*", "")
+  if (cleaned.startsWith(",")) cleaned = cleaned.substring(1)
+  cleaned = cleaned.replaceAll("0[xX]", "")
+  String[] parts = cleaned.split("[\\-,]")
+  def hex2 = parts.findAll { it != null && it.length()==2 && it ==~ /^[0-9A-Fa-f]{2}$/ }
+  if (hex2.size() >= 3) return hex2[-3..-1].collect { it.toUpperCase() }
+  return hex2.collect { it.toUpperCase() }
+}
+
+private String format0x(List<String> bytes) {
+  if (!bytes || bytes.isEmpty()) return ""
+  return bytes.collect { "0x${it}" }.join(",")
+}
+
+private String ensureMac() {
+  String raw = state.macaddress ?: ""
+  List<String> last3 = extractLast3HexBytes(raw)
+  String norm = format0x(last3)
+  if (norm && norm != raw) {
+    state.macaddress = norm
+    if ((Boolean)settings.logDebug) log.debug "${drvThis}: MAC normalizado -> ${norm} (de '${raw}')"
+  }
+  return norm
+}
+
+// ======== Lifecycle ========
 
 def installed() {
-    logTrace('installed()')
-    def novaprimeira = ""
-    def oldprimeira = ""
-    state.childscreated = 0
-    state.inputcount = 12
-    state.outputcount = 10      
-    runIn(1800, logsOff)
-
-
+  state.childscreated = 0
+  state.outputcount = (settings.outputs ?: 10) as int
+  state.inputcount  = (settings.inputs  ?: 12) as int
+  state.prevInputs = (0..<12).collect{ "0" }
+  state.lastPulseTs = (0..<12).collect{ 0L }
+  state.suppressOutUntil = 0L
+  sendEvent(name:"numberOfButtons", value: state.inputcount)
+  runIn(1800, logsOff)
 }
 
 def uninstalled() {
-    logTrace('uninstalled()')
-    unschedule()
-    interfaces.rawSocket.close()
+  unschedule()
+  try { interfaces.rawSocket.close() } catch (e) {}
 }
 
-def updated() {
-    logTrace('updated()')
-    //initialize()
-    //refresh()
-}
-
-def configure() {
-    logTrace('configure()')
-    state.inputcount = 12
-    state.outputcount = 10      
-    unschedule()
-}
-
-def cleanup (){
- 
-    state.clear()
-    
-}
-
-
-def reconnect () {
-    interfaces.rawSocket.close();
-    state.lastMessageReceived = ""
-    state.lastmessage = ""
-    state.macaddress = ""
-    state.lastprimeira = ""
-    state.primeira = ""
-
-    try {
-        logTrace("tentando conexão com o device no ${device_IP_address}...na porta ${device_port}");
-        int i = 4998
-        interfaces.rawSocket.connect(device_IP_address, (int) device_port);
-        state.lastMessageReceivedAt = now();
-        //runEvery5Minutes(getstatus)
-        runIn(checkInterval, "connectionCheck");
-        //refresh();  // se estava offline, preciso fazer um refresh
-    }
-    catch (e) {
-         logWarn( "${device_IP_address} keepalive error: ${e.message}" )
-         sendEvent(name: "boardstatus", value: "offline", isStateChange: true)        
-         //runIn(5, "keepalive");
-    }
-    pauseExecution(500)    
-    getmac()
-    
-}
-    
-
-
-def keepalive() {
-    logTrace('keepalive()')
-    unschedule()
-    state.lastMessageReceived = ""
-    state.lastmessage = ""
-    state.macaddress = ""
-    state.lastprimeira = ""
-    state.primeira = ""
-    interfaces.rawSocket.close();
-    
-    state.childscreated = 1
-    state.inputcount = 12
-    state.outputcount = 10        
-    String thisId = device.id
-    state.netids = "${thisId}-Switch-"
-  
-    try {
-        logTrace("tentando conexão com o device no ${device_IP_address}...na porta ${device_port}");
-        int i = 4998
-        interfaces.rawSocket.connect(device_IP_address, (int) device_port);
-        state.lastMessageReceivedAt = now();
-        //runEvery5Minutes(getstatus)
-        runIn(checkInterval, "connectionCheck");
-        //refresh();  // se estava offline, preciso fazer um refresh
-    }
-    catch (e) {
-         logWarn( "${device_IP_address} keepalive error: ${e.message}" )
-         sendEvent(name: "boardstatus", value: "offline", isStateChange: true)        
-         //runIn(5, "keepalive");
-    }
-    pauseExecution(500)    
-    getmac()
-    
-}
-
+def updated() { initialize() }
+def configure() { initialize() }
 
 def initialize() {
-    logTrace('initialize()')
-    unschedule()
-    interfaces.rawSocket.close();
-    state.lastMessageReceived = ""
-    state.lastmessage = ""
-    state.macaddress = ""
-    state.inputs = ""
-    state.outputs = "" 
-    state.inputcount = 12
-    state.outputcount = 10  
-    state.lastprimeira = ""
-    state.primeira = ""    
-    String thisId = device.id
-    state.netids = "${thisId}-Switch-"    
-    
-    if (!device_IP_address) {
-        logError 'IP do Device not configured'
-        return
-    }
+  unschedule()
+  try { interfaces.rawSocket.close() } catch (e) {}
 
-    if (!device_port) {
-        logError 'Porta do Device não configurada.'
-        return
+  state.lastMessageReceived = ""
+  state.lastMessageReceivedAt = 0L
+  if (!state.prevInputs || !(state.prevInputs instanceof List)) state.prevInputs = (0..<12).collect{ "0" }
+  if (!state.lastPulseTs || !(state.lastPulseTs instanceof List)) state.lastPulseTs = (0..<12).collect{ 0L }
+  state.suppressOutUntil = 0L
+  state.inputsStr = ""
+  state.outputsStr = ""
+  state.primeira = ""
+  state.lastprimeira = ""
+  lineBuffer = ""
+
+  state.outputcount = Math.min((settings.outputs ?: 10) as int, 10)
+  state.inputcount  = Math.min((settings.inputs  ?: 12) as int, 12)
+  sendEvent(name:"numberOfButtons", value: state.inputcount)
+
+  if (!device_IP_address) { logError 'IP do Device não configurado.'; return }
+  if (!device_port) { logError 'Porta do Device não configurada.'; return }
+
+  try {
+    logInfo("Conectando em ${device_IP_address}:${(int)device_port} ...")
+    interfaces.rawSocket.connect(device_IP_address, (int) device_port)
+    state.lastMessageReceivedAt = now()
+    runIn(checkInterval, "connectionCheck")
+  } catch (e) {
+    logError("initialize connect error: ${e.message}")
+    sendEvent(name: "boardstatus", value: "offline", isStateChange: true)
+    return
+  }
+
+  pauseExecution(150)
+  getmac()
+
+  if (settings.autoCreateChildren && (state.childscreated != 1)) {
+    createChildren()
+  }
+
+  pauseExecution(100)
+  getstatus()
+}
+
+// ======== Child creation ========
+
+private createChildren() {
+  String base = device.id as String
+
+  for (int i = 1; i <= state.outputcount; i++) {
+    String dni = "${base}-${OUT_PREFIX}${i}"
+    if (!getChildDevice(dni)) {
+      addChildDevice("hubitat", "Generic Component Switch", dni,
+        [name: "${device.displayName} ${OUT_PREFIX}${i}", isComponent: true])
     }
-    
-    
+  }
+
+  if (settings.inputsCreateContactChildren) {
+    for (int j = 1; j <= state.inputcount; j++) {
+      String dni = "${base}-${IN_PREFIX}${j}"
+      if (!getChildDevice(dni)) {
+        addChildDevice("hubitat", "Generic Component Contact Sensor", dni,
+          [name: "${device.displayName} ${IN_PREFIX}${j}", isComponent: true])
+      }
+    }
+  } else {
+    for (int j = 1; j <= 12; j++) {
+      String dni = "${base}-${IN_PREFIX}${j}"
+      def cd = getChildDevice(dni)
+      if (cd) deleteChildDevice(dni)
+    }
+  }
+
+  state.childscreated = 1
+}
+
+// ======== Comandos ========
+
+def keepalive() { reconnect() }
+
+def reconnect() {
+  try { interfaces.rawSocket.close() } catch (e) {}
+  sendEvent(name: "boardstatus", value: "offline", isStateChange: true)
+  initialize()
+}
+
+def getmac()         { sendCommand("get_mac_addr") }
+def getfw()          { sendCommand("get_firmware_version") }
+
+def getstatus() {
+  String mac = ensureMac()
+  if (!mac) { getmac(); pauseExecution(150); mac = ensureMac() }
+  if (!mac) return
+  sendCommand("mdcmd_getmd,${mac}")
+}
+
+def on()  { allOn() }
+def off() { allOff() }
+
+def allOn()  {
+  String mac = ensureMac()
+  if (mac) sendCommand("mdcmd_setallonmd,${mac}")
+}
+def allOff() {
+  String mac = ensureMac()
+  if (mac) sendCommand("mdcmd_setalloffmd,${mac}")
+}
+
+def masterOn()  { sendCommand("mdcmd_setmasteronmd") }
+def masterOff() { sendCommand("mdcmd_setmasteroffmd") }
+
+// ======== Envio TCP ========
+
+private sendCommand(String s) {
+  String frame = s + CRLF
+  logDebug("TX: ${s}")
+  interfaces.rawSocket.sendMessage(frame)
+}
+
+// ======== Parser TCP ========
+
+private boolean looksLikeHex(String s) {
+  if (s == null) return false
+  return s ==~ /^[0-9A-Fa-f\s]+$/
+}
+
+def parse(String msg) {
+  state.lastMessageReceived = new Date(now()).toString()
+  state.lastMessageReceivedAt = now()
+  if (msg == null) return
+
+  String chunk
+  if (looksLikeHex(msg)) {
     try {
-        logTrace("Start conexão com o device no ${device_IP_address}...na porta ${device_port}");
-        int i = 4998
-        interfaces.rawSocket.connect(device_IP_address, (int) device_port);
-        state.lastMessageReceivedAt = now();
-        //runEvery5Minutes(getstatus)
-        runIn(checkInterval, "connectionCheck");
-        //refresh();  // se estava offline, preciso fazer um refresh
+      byte[] ba = hubitat.helper.HexUtils.hexStringToByteArray(msg.replaceAll("\\s+",""))
+      chunk = new String(ba as byte[])
+    } catch (e) {
+      logWarn("Falha ao decodificar HEX: ${e.message}")
+      return
     }
-    catch (e) {
-         logError( "${device_IP_address} initialize error: ${e.message}" )
-         sendEvent(name: "boardstatus", value: "offline", isStateChange: true)        
-         //runIn(2, "initialize");
-    }
-        pauseExecution(100)
-        getmac()
-        pauseExecution(200)
-     //CREATE CHILDS
-        
-    if (state.childscreated != 1)
-    {
-        createchilds()    
-    
-    }
-    
-        pauseExecution(200)
-        getstatus()
- 
- 
+  } else {
+    chunk = msg
+  }
+
+  lineBuffer += chunk
+  int idx
+  while ((idx = lineBuffer.indexOf("\r\n")) >= 0) {
+    String line = lineBuffer.substring(0, idx)
+    lineBuffer = lineBuffer.substring(idx + 2)
+    handleLine(line?.trim())
+  }
 }
 
+private void handleLine(String line) {
+  if (!line) return
+  logTrace("RX: ${line}")
 
-def createchilds() {
+  if (line.equalsIgnoreCase("Parse Error!") || line.equalsIgnoreCase("Parse Error")) {
+    logWarn("Módulo retornou 'Parse Error!' (provável comando anterior inválido).")
+    return
+  }
 
-    String thisId = device.id
-    state.netids = "${thisId}-Switch-"
-    
-    log.info "Creating Childs. Info thisid =  " + thisId
-	def cd = getChildDevice("${thisId}-Switch")
-	if (!cd) {
-        log.info "outputcount = " + state.outputcount 
-        for(int i = 1; i<=state.outputcount; i++) {        
-        cd = addChildDevice("hubitat", "Generic Component Switch", "${thisId}-Switch-" + Integer.toString(i), [name: "${device.displayName} Switch-" + Integer.toString(i) , isComponent: true])
-        log.info "added switch # " + i + " from " + state.outputcount            
-       
-        }
-    }  
-    state.childscreated == 1
-}
-
-def getstatus()
-{
-    getmac()
-    pauseExecution(500)
-    def msg = "mdcmd_getmd," + state.macaddress
-    logTrace('Sent getstatus()')
-    sendCommand(msg)
-
-    
-}
-
-
-def getmac(){
-    def msg = "get_mac_addr" 
-    //def msg = "get_mac_addr\r\n" 
-    logTrace('Sent getmac()')
-    sendCommand(msg)
-
-}
-
-def getfw()
-{
-    def msg = "get_firmware_version\r\n"
-    logTrace('Sent getfw()')
-    sendCommand(msg)
-
-}
-
-def refresh() {
-    def msg = "mdcmd_getmd," + state.macaddress
-    logTrace('Sent refresh()')   
-    sendCommand(msg)
-}
-
-
-//Feedback e o tratamento 
-
- def fetchChild(String type, String name){
-    String thisId = device.id
-    def cd = getChildDevice("${thisId}-${type}_${name}")
-    if (!cd) {
-        cd = addChildDevice("hubitat", "Generic Component ${type}", "${thisId}-${type}_${name}", [name: "${name}", isComponent: true])
-        cd.parse([[name:"switch", value:"off", descriptionText:"set initial switch value"]]) //TEST!!
+  if (line.startsWith("macaddr")) {
+    int cut = Math.max(line.indexOf('_'), line.indexOf(','))
+    String tail = (cut >= 0 && cut+1 < line.length()) ? line.substring(cut+1) : line
+    List<String> last3 = extractLast3HexBytes(tail)
+    String formatted = format0x(last3)
+    if (formatted) {
+      state.macaddress = formatted
+      sendEvent(name: "mac3_5", value: formatted, isStateChange: true)
+      sendEvent(name: "boardstatus", value: "online", isStateChange: true)
+      logInfo("MAC (v6pb2): ${formatted}")
+      return
+    } else {
+      logWarn("Não foi possível extrair 3 bytes hex do MAC em: '${line}'")
     }
-    return cd 
+  }
+
+  if (line.startsWith("VERSION")) {
+    sendEvent(name: "firmware", value: line, isStateChange: true)
+    return
+  }
+
+  if (line.startsWith("setcmd,")) {
+    def arr = line.split(",")
+    if (arr.size() >= 24) {
+      updateInputsOutputs(arr)
+      sendEvent(name: "boardstatus", value: "online", isStateChange: true)
+      return
+    }
+  }
+
+  if (line.equalsIgnoreCase("MasterOn") || line.equalsIgnoreCase("MasterOff")) {
+    runInMillis(150, "getstatus")
+    return
+  }
 }
 
+// ======== Atualização de IN/OUT ========
 
+private void updateInputsOutputs(String[] arr) {
+  int inStart = 2
+  int inEnd   = inStart + 12 - 1
+  int outStart = inEnd + 1
+  int outEnd   = outStart + 10 - 1
 
-def parse(msg) {
-    state.lastMessageReceived = new Date(now()).toString();
-    state.lastMessageReceivedAt = now();
-    
+  String ins  = (inStart..inEnd).collect { arr[it] }.join("")
+  String outs = (outStart..outEnd).collect { arr[it] }.join("")
+  state.inputsStr  = ins
 
-    
-    def oldmessage = state.lastmessage
+  long nowTs = now()
+  long until = (state.suppressOutUntil ?: 0L) as long
+  boolean allowOutUpdate = (nowTs >= until)
 
-    
-    def newmsg = hubitat.helper.HexUtils.hexStringToByteArray(msg) //na Mol, o resultado vem em HEX, então preciso converter para Array
-    def newmsg2 = new String(newmsg) // Array para String
-    
-    
-    state.lastmessage = newmsg2
-    larguramsg = newmsg2.length()
-    state.larguramsg = larguramsg
-    log.info "qtde chars = " + larguramsg
-    log.info "lastmessage = " + newmsg2
-    //firmware
-    if (newmsg2.length() < 7) {
-        state.firmware = newmsg2
-        log.info "FW = " + newmsg2
-        //sendEvent(name: "boardstatus", value: "online")
-    }
+  String base = device.id as String
+  boolean pulse = (settings.inputsPulseMode == true)
+  long debounce = (settings.pulseDebounceMs ?: 50) as long
+  long releaseMs = (settings.pulseReleaseMs ?: 150) as long
+  long suppressMs = (settings.suppressOutputsMs ?: 250) as long
 
-    //macadress
-    if (newmsg2.contains("macaddr")){
-        //log.info "mac completa = " + newmsg2
-        mac = newmsg2
-        newmac = (mac.substring(10)); 
-        newmac = (newmac.replaceAll(",","0x")); 
-        newmac = (newmac.replaceAll("-",",0x")); 
-        newmac = newmac.replaceAll("\\s","")
+  // ---- Inputs
+  for (int i = 0; i < state.inputcount; i++) {
+    int idx = inStart + i
+    if (idx >= arr.size()) break
+    String val = arr[idx]?.trim()
+    if (!val) continue
 
-                
-        log.info "Got macaddress =  " + newmac 
-        state.macaddress = newmac
-
-        sendEvent(name: "boardstatus", value: "online")
-    }
-
-    //parse-error treatment
-    if (newmsg2.contains("Parse Error!")){
-        keepalive()
-    }
-    
-    //getstatus
-    if (newmsg2.contains("setcmd")){
-        sendEvent(name: "boardstatus", value: "online")
-        def oldprimeira = state.primeira  
-        state.lastprimeira =  state.primeira //salvo o valor anterior
-
-        //tratamento para pegar os inputs e outputs 
-        newmsg2 = newmsg2[16..60]
-        varinputs = newmsg2[0..22]
-        varinputs = varinputs.replaceAll(",","")
-        state.inputs  = varinputs
-        varoutputs = newmsg2[24..44]
-        varoutputs =  varoutputs.replaceAll(",","")
-        
-        state.outputs =  varoutputs
-        novaprimeira = varoutputs
-        state.primeira = novaprimeira
-        
-        if ((novaprimeira)&&(oldprimeira)) {  //if not empty in first run
-        
-            if (novaprimeira.compareToIgnoreCase(oldprimeira) == 0){
-            
-                log.info "No changes in relay status"
-                
+    String prev = (state.prevInputs[i] ?: "0") as String
+    if (!pulse) {
+      if (settings.inputsCreateContactChildren) {
+        String contact = (val == "1") ? "closed" : "open"
+        def cd = getChildDevice("${base}-${IN_PREFIX}${i+1}")
+        if (cd) cd.parse([[name:"contact", value: contact]])
+      }
+    } else {
+      // Pulse: borda 0->1 => botão/contato + supressão
+      if (prev != "1" && val == "1") {
+        long lastTs = (state.lastPulseTs[i] ?: 0L) as long
+        if (nowTs - lastTs >= debounce) {
+          if (settings.inputsAsButtons) {
+            sendEvent(name:"pushed", value: i+1, isStateChange:true, type:"digital")
+          }
+          if (settings.inputsCreateContactChildren) {
+            String dni = "${base}-${IN_PREFIX}${i+1}"
+            def cd = getChildDevice(dni)
+            if (cd) {
+              cd.parse([[name:"contact", value:"closed", isStateChange:true]])
+              runInMillis((int)releaseMs, "releaseInput", [data:[dni:dni]])
             }
-            
-            else{
-              
-            for(int f = 0; f <state.outputcount; f++) {  
-            def valprimeira = state.primeira[f]
-            def valold = oldprimeira[f]
-            def diferenca = valold.compareToIgnoreCase(valprimeira)            
-                
-                //log.info "valor valprimeira = " + valprimeira + " , valor valold = " + valold + " , valdiferenca = " + diferenca
-                switch(diferenca) { 
-                 case 0: 
-                   log.info "no changes in ch#" + (f+1) ;
-                 break                     
-                
-                 case -1:  //  -1 is when light was turned ON                   
-                   if (state.update == 1){     //no hace nada porque fue el switch
-                   log.info "(NOTHING) - ON changes in ch#" + (f+1) ;
-                   }
-                   else {
-
-                    chdid = state.netids + (f+1) 
-                    def cd = getChildDevice(chdid)
-                    log.info "ON changes in ch#" + (f+1) +  ", chdid = " + chdidchdid + ", cd = " + cd   
-                    getChildDevice(cd.deviceNetworkId).parse([[name:"switch", value:"on", descriptionText:"${cd.displayName} was turned on"]])
-                    //buscar y cambiar el status a ON del switch
-                        }
-                 break
-                
-                 case 1: // 1 is when light was turned OFF
-                    log.info "OFF changes in ch#" + (f+1) ;
-                    chdid = state.netids + (f+1) 
-                    def cd = getChildDevice(chdid) 
-                    getChildDevice(cd.deviceNetworkId).parse([[name:"switch", value:"off", descriptionText:"${cd.displayName} was turned off"]])                   
-                    //buscar y cambiar el status a OFF del switch
-    
-                 break          
-                
-                default:
-                log.info "changes in ch#" + (f+1) + " with dif " + diferenca;
-                break                    
-            
-            
-               }//switch
-        
-          }//for 
-                    state.update = 0  
-
-        state.primeira = state.outputs
-        log.info "Status " + newmsg2 
-        log.info "Outputs " + state.outputs
-        log.info "Inputs " + state.inputs        
-        
-        
-          } //else hubo cambios
-    
-         //log.info "status do update = " + state.update      
-} //fechou 
-
+          }
+          state.suppressOutUntil = nowTs + suppressMs
+        }
+        state.lastPulseTs[i] = nowTs
+      }
+      // Fallback: borda 1->0 => abre contato se ainda estiver fechado
+      if (prev == "1" && val == "0" && settings.inputsCreateContactChildren) {
+        String dni = "${base}-${IN_PREFIX}${i+1}"
+        def cd = getChildDevice(dni)
+        if (cd) cd.parse([[name:"contact", value:"open", isStateChange:true]])
+      }
     }
-} 
-    
-////////////////
-////Commands 
-////////////////
+    state.prevInputs[i] = val
+  }
 
-def on()
-{
-    logDebug("Master Power ON()")
-    def msg = "mdcmd_setallonmd," + state.macaddress + "\r\n"
-    sendCommand(msg)
-    pauseexecution(700)
-    getstatus()
-    
+  // ---- Outputs
+  if (allowOutUpdate) {
+    state.outputsStr = outs
+    for (int j = 0; j < state.outputcount; j++) {
+      int idx = outStart + j
+      if (idx >= arr.size()) break
+      String val = arr[idx]?.trim()
+      if (!val) continue
+      String sw = (val == "1") ? "on" : "off"
+      def cd = getChildDevice("${base}-${OUT_PREFIX}${j+1}")
+      if (cd) cd.parse([[name:"switch", value: sw]])
+    }
+  } else {
+    logTrace("Atualização de OUT ignorada por supressão pós-pulso (até ${new Date(state.suppressOutUntil as long)})")
+  }
 }
 
-
-def off()
-{
-    logDebug("Master Power OFF()")
-    def msg = "mdcmd_setmasteroffmd," + state.macaddress + "\r\n"
-    sendCommand(msg)
-    pauseexecution(700)
-    getstatus()
-    
+// Retorna o contato para 'open' após o tempo de pulso
+def releaseInput(data) {
+  try {
+    String dni = data?.dni
+    if (!dni) return
+    def cd = getChildDevice(dni)
+    if (cd) cd.parse([[name:"contact", value:"open", isStateChange:true]])
+  } catch (e) {
+    logWarn("releaseInput error: ${e.message}")
+  }
 }
 
+// ======== Child callbacks ========
 
-private sendCommand(s) {
-    logDebug("sendingCommand ${s}")
-    interfaces.rawSocket.sendMessage(s)    
+void componentRefresh(cd) { getstatus() }
+
+void componentOn(cd) {
+  int ch = childToOutputIndex(cd)
+  if (ch < 0) return
+  String mac = ensureMac()
+  if (!mac) { getmac(); pauseExecution(120); mac = ensureMac() }
+  if (!mac) return
+  sendCommand("mdcmd_sendrele,${mac},${ch},1")
+  getChildDevice(cd.deviceNetworkId).parse([[name:"switch", value:"on"]])
+  runInMillis(120, "getstatus")
 }
 
+void componentOff(cd) {
+  int ch = childToOutputIndex(cd)
+  if (ch < 0) return
+  String mac = ensureMac()
+  if (!mac) { getmac(); pauseExecution(120); mac = ensureMac() }
+  if (!mac) return
+  sendCommand("mdcmd_sendrele,${mac},${ch},0")
+  getChildDevice(cd.deviceNetworkId).parse([[name:"switch", value:"off"]])
+  runInMillis(120, "getstatus")
+}
 
-////////////////////////////
-//// Connections Checks ////
-////////////////////////////
+private int childToOutputIndex(cd) {
+  String dni = cd.deviceNetworkId ?: ""
+  int pos = dni.indexOf("-${OUT_PREFIX}")
+  if (pos < 0) return -1
+  try {
+    String num = dni.substring(pos + ("-${OUT_PREFIX}").length())
+    int n = num as int
+    return Math.max(0, Math.min(9, n-1))
+  } catch (e) {
+    return -1
+  }
+}
+
+// ======== Conexão / watchdog ========
 
 def connectionCheck() {
-    def now = now();
-    logDebug("ConnectionCheck Running")
-
-    if ( now - state.lastMessageReceivedAt > (checkInterval * 1000)) { 
-        logWarn("sem mensagens desde ${(now - state.lastMessageReceivedAt)/60000} minutos, reconectando ...");
-        keepalive();
-    }
-    else if (state.lastmessage.contains("ParseError")){
-        logWarn("Problemas no último Parse, reconectando ...");
-        keepalive();
-    } else {       
-        logDebug("Connection Check = ok - Board response. ");
-        sendEvent(name: "boardstatus", value: "online")
-        runIn(checkInterval, "connectionCheck");
-    }
+  long n = now()
+  if (!state.lastMessageReceivedAt) state.lastMessageReceivedAt = 0L
+  if (n - state.lastMessageReceivedAt > (checkInterval * 1000)) {
+    logWarn("Sem mensagens há ${(n - state.lastMessageReceivedAt)/60000} min; reconectando...")
+    reconnect()
+  } else {
+    logDebug("Connection Check OK.")
+    sendEvent(name: "boardstatus", value: "online")
+    runIn(checkInterval, "connectionCheck")
+  }
 }
 
+def refresh() { getstatus() }
 
-
-
-/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-// Component Child
-/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-void componentRefresh(cd){
-	if (logEnable) log.info "received refresh request from ${cd.displayName}"
-	refresh()
-    
-    
+def cleanup() {
+  state.clear()
+  lineBuffer = ""
+  logInfo("State limpo.")
 }
 
-def componentOn(cd){
-	if (logEnable) log.info "received on request from ${cd.displayName}"
-    getChildDevice(cd.deviceNetworkId).parse([[name:"switch", value:"on", descriptionText:"${cd.displayName} was turned on"]])       
-    on(cd)  
-    pauseExecution(300)
-    //getstatus()
-    
-}
-
-void componentOff(cd){
-	if (logEnable) log.info "received off request from ${cd.displayName}"
-    getChildDevice(cd.deviceNetworkId).parse([[name:"switch", value:"off", descriptionText:"${cd.displayName} was turned off"]])    
-	off(cd)
-    pauseExecution(300)
-    //getstatus()
-
-}
-
-
-////// Driver Commands /////////
-
-
-
-//SEND ON COMMAND IN CHILD BUTTON
-void on(cd) {
-if (logEnable) log.debug "Turn device ON"	
-sendEvent(name: "switch", value: "on", isStateChange: true)
-
-
-ipdomodulo  = state.ipaddress
-lengthvar =  (cd.deviceNetworkId.length())
-int relay = 0
-
-
-/// Inicio verificación del length    
-      substr1 = cd.deviceNetworkId.indexOf("-", cd.deviceNetworkId.indexOf("-") + 1);
-      def result01 = lengthvar - substr1 
-      if (result01 > 2  ) {
-           def  substr2a = substr1 + 1
-           def  substr2b = substr1 + 2
-           def substr3 = cd.deviceNetworkId[substr2a..substr2b]
-           numervalue1 = substr3
-          
-      }
-      else {
-          def substr3 = cd.deviceNetworkId[substr1+1]
-          numervalue1 = substr3
-        
-           }
-
-    def valor = ""
-    valor =   numervalue1 as Integer
-    relay = valor-1   
-
- ////
-     def stringrelay = relay
-     def comando = "mdcmd_sendrele," +state.macaddress+ "," + stringrelay + ",1\r\n"
-     if (state.macaddress.length() < 2 == ""){
-        keepalive()
-     } 
-     interfaces.rawSocket.sendMessage(comando)
-     log.info "Foi Ligado o Relay " + relay + " via TCP " + comando 
-     sendEvent(name: "power", value: "on")
-     state.update = 1  //variable to control update with board on parse
-    
-}
-
-
-//SEND OFF COMMAND IN CHILD BUTTON 
-void off(cd) {
-if (logEnable) log.debug "Turn device OFF"	
-sendEvent(name: "switch", value: "off", isStateChange: true)
-
-    
-ipdomodulo  = state.ipaddress
-lengthvar =  (cd.deviceNetworkId.length())
-int relay = 0
-
-/// Inicio verificación del length    
-      substr1 = cd.deviceNetworkId.indexOf("-", cd.deviceNetworkId.indexOf("-") + 1);
-      def result01 = lengthvar - substr1 
-      if (result01 > 2  ) {
-           def  substr2a = substr1 + 1
-           def  substr2b = substr1 + 2
-           def substr3 = cd.deviceNetworkId[substr2a..substr2b]
-           numervalue1 = substr3
-          
-      }
-      else {
-          def substr3 = cd.deviceNetworkId[substr1+1]
-          numervalue1 = substr3
-         
-           }
-
-    def valor = ""
-    valor =   numervalue1 as Integer
-    relay = valor-1   
-
- ////
-     def stringrelay = relay   
-     def comando = "mdcmd_sendrele," +state.macaddress+ "," + stringrelay + ",0\r\n"
-     if (state.macaddress.length() < 2 == ""){
-        keepalive()
-     }      
-     interfaces.rawSocket.sendMessage(comando)
-     log.info "Foi Desligado o Relay " + relay + " via TCP " + comando 
-     state.update = 1    //variable to control update with board on parse
-    
-}
-
-
-
-
-
-
-////////////////////////////////////////////////
-////////LOGGING
-///////////////////////////////////////////////
-
-
-private processEvent( Variable, Value ) {
-    if ( state."${ Variable }" != Value ) {
-        state."${ Variable }" = Value
-        logDebug( "Event: ${ Variable } = ${ Value }" )
-        sendEvent( name: "${ Variable }", value: Value, isStateChanged: true )
-    }
-}
-
-
+// ======== Logs ========
 
 def logsOff() {
-    log.warn 'logging disabled...'
-    device.updateSetting('logInfo', [value:'false', type:'bool'])
-    device.updateSetting('logWarn', [value:'false', type:'bool'])
-    device.updateSetting('logDebug', [value:'false', type:'bool'])
-    device.updateSetting('logTrace', [value:'false', type:'bool'])
+  log.warn 'logging disabled...'
+  device.updateSetting('logInfo', [value:'false', type:'bool'])
+  device.updateSetting('logWarn', [value:'false', type:'bool'])
+  device.updateSetting('logDebug', [value:'false', type:'bool'])
+  device.updateSetting('logTrace', [value:'false', type:'bool'])
 }
 
-void logDebug(String msg) {
-    if ((Boolean)settings.logDebug != false) {
-        log.debug "${drvThis}: ${msg}"
-    }
-}
-
-void logInfo(String msg) {
-    if ((Boolean)settings.logInfo != false) {
-        log.info "${drvThis}: ${msg}"
-    }
-}
-
-void logTrace(String msg) {
-    if ((Boolean)settings.logTrace != false) {
-        log.trace "${drvThis}: ${msg}"
-    }
-}
-
-void logWarn(String msg, boolean force = false) {
-    if (force || (Boolean)settings.logWarn != false) {
-        log.warn "${drvThis}: ${msg}"
-    }
-}
-
-void logError(String msg) {
-    log.error "${drvThis}: ${msg}"
-}
-
+void logDebug(String msg) { if ((Boolean)settings.logDebug) log.debug "${drvThis}: ${msg}" }
+void logInfo(String msg)  { if ((Boolean)settings.logInfo)  log.info  "${drvThis}: ${msg}" }
+void logTrace(String msg) { if ((Boolean)settings.logTrace) log.trace "${drvThis}: ${msg}" }
+void logWarn(String msg)  { if ((Boolean)settings.logWarn)  log.warn  "${drvThis}: ${msg}" }
+void logError(String msg) { log.error "${drvThis}: ${msg}" }
