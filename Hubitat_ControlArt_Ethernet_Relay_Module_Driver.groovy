@@ -60,7 +60,7 @@ command "connectionCheck"
 
 
 @Field static String partialMessage = ''
-@Field static Integer checkInterval = 60
+@Field static Integer checkInterval = 100
 
 
 def installed() {
@@ -519,7 +519,9 @@ void componentOff(cd){
 void on(cd) {
 if (logEnable) log.debug "Turn device ON"	
 sendEvent(name: "switch", value: "on", isStateChange: true)
-
+     if (state.macaddress.length() < 2 == ""){
+        keepalive()
+     } 
 
 ipdomodulo  = state.ipaddress
 lengthvar =  (cd.deviceNetworkId.length())
@@ -549,9 +551,6 @@ int relay = 0
  ////
      def stringrelay = relay
      def comando = "mdcmd_sendrele," +state.macaddress+ "," + stringrelay + ",1\r\n"
-     if (state.macaddress.length() < 2 == ""){
-        keepalive()
-     } 
      interfaces.rawSocket.sendMessage(comando)
      log.info "Foi Ligado o Relay " + relay + " via TCP " + comando 
      sendEvent(name: "power", value: "on")
@@ -564,7 +563,9 @@ int relay = 0
 void off(cd) {
 if (logEnable) log.debug "Turn device OFF"	
 sendEvent(name: "switch", value: "off", isStateChange: true)
-
+     if (state.macaddress.length() < 2 == ""){
+        keepalive()
+     } 
     
 ipdomodulo  = state.ipaddress
 lengthvar =  (cd.deviceNetworkId.length())
@@ -593,9 +594,6 @@ int relay = 0
  ////
      def stringrelay = relay   
      def comando = "mdcmd_sendrele," +state.macaddress+ "," + stringrelay + ",0\r\n"
-     if (state.macaddress.length() < 2 == ""){
-        keepalive()
-     }      
      interfaces.rawSocket.sendMessage(comando)
      log.info "Foi Desligado o Relay " + relay + " via TCP " + comando 
      state.update = 1    //variable to control update with board on parse
