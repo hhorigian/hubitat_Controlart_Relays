@@ -1,10 +1,10 @@
 {
     "packageName":"Controlart - Ethernet Relay Module",
     "author":"TRATO",
-    "version":"1.0",
+    "version":"1.4",
     "minimumHEVersion":"2.3.7.100",
-    "dateReleased":"2024-05-22",
-    "releaseNotes":"First version pushed to HPM",
+    "dateReleased":"2025-08-11",
+    "releaseNotes":"Update with Input (as buttons) support",
     "documentationLink":"https://github.com/hhorigian/Controlart_Relays",
     "drivers": [
      {
