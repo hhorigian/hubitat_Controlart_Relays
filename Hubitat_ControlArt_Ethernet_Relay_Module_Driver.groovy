@@ -64,17 +64,12 @@ metadata {
     input "pulseDebounceMs", "number", title: "Debounce do pulso (ms)", defaultValue: 50
     input "suppressOutputsMs", "number", title: "Ignorar atualização de OUT após pulso (ms)", defaultValue: 250
 
-<<<<<<< HEAD
-@Field static String partialMessage = ''
-@Field static Integer checkInterval = 100
-=======
     input 'logInfo',  'bool', title: 'Show Info Logs?',  defaultValue: true
     input 'logWarn',  'bool', title: 'Show Warning Logs?', defaultValue: true
     input 'logDebug', 'bool', title: 'Show Debug Logs?', description: 'Only leave on when required', defaultValue: true
     input 'logTrace', 'bool', title: 'Show Detailed Logs?', description: 'Only leave on when required', defaultValue: false
   }
 }
->>>>>>> 4d0a1935c409fb74df1ff9dd5615cffa1ab8b586
 
 // ======== Constantes / Estado ========
 
@@ -492,137 +487,7 @@ def cleanup() {
   logInfo("State limpo.")
 }
 
-<<<<<<< HEAD
-def componentOn(cd){
-	if (logEnable) log.info "received on request from ${cd.displayName}"
-    getChildDevice(cd.deviceNetworkId).parse([[name:"switch", value:"on", descriptionText:"${cd.displayName} was turned on"]])       
-    on(cd)  
-    pauseExecution(300)
-    //getstatus()
-    
-}
-
-void componentOff(cd){
-	if (logEnable) log.info "received off request from ${cd.displayName}"
-    getChildDevice(cd.deviceNetworkId).parse([[name:"switch", value:"off", descriptionText:"${cd.displayName} was turned off"]])    
-	off(cd)
-    pauseExecution(300)
-    //getstatus()
-
-}
-
-
-////// Driver Commands /////////
-
-
-
-//SEND ON COMMAND IN CHILD BUTTON
-void on(cd) {
-if (logEnable) log.debug "Turn device ON"	
-sendEvent(name: "switch", value: "on", isStateChange: true)
-     if (state.macaddress.length() < 2 == ""){
-        keepalive()
-     } 
-
-ipdomodulo  = state.ipaddress
-lengthvar =  (cd.deviceNetworkId.length())
-int relay = 0
-
-
-/// Inicio verificación del length    
-      substr1 = cd.deviceNetworkId.indexOf("-", cd.deviceNetworkId.indexOf("-") + 1);
-      def result01 = lengthvar - substr1 
-      if (result01 > 2  ) {
-           def  substr2a = substr1 + 1
-           def  substr2b = substr1 + 2
-           def substr3 = cd.deviceNetworkId[substr2a..substr2b]
-           numervalue1 = substr3
-          
-      }
-      else {
-          def substr3 = cd.deviceNetworkId[substr1+1]
-          numervalue1 = substr3
-        
-           }
-
-    def valor = ""
-    valor =   numervalue1 as Integer
-    relay = valor-1   
-
- ////
-     def stringrelay = relay
-     def comando = "mdcmd_sendrele," +state.macaddress+ "," + stringrelay + ",1\r\n"
-     interfaces.rawSocket.sendMessage(comando)
-     log.info "Foi Ligado o Relay " + relay + " via TCP " + comando 
-     sendEvent(name: "power", value: "on")
-     state.update = 1  //variable to control update with board on parse
-    
-}
-
-
-//SEND OFF COMMAND IN CHILD BUTTON 
-void off(cd) {
-if (logEnable) log.debug "Turn device OFF"	
-sendEvent(name: "switch", value: "off", isStateChange: true)
-     if (state.macaddress.length() < 2 == ""){
-        keepalive()
-     } 
-    
-ipdomodulo  = state.ipaddress
-lengthvar =  (cd.deviceNetworkId.length())
-int relay = 0
-
-/// Inicio verificación del length    
-      substr1 = cd.deviceNetworkId.indexOf("-", cd.deviceNetworkId.indexOf("-") + 1);
-      def result01 = lengthvar - substr1 
-      if (result01 > 2  ) {
-           def  substr2a = substr1 + 1
-           def  substr2b = substr1 + 2
-           def substr3 = cd.deviceNetworkId[substr2a..substr2b]
-           numervalue1 = substr3
-          
-      }
-      else {
-          def substr3 = cd.deviceNetworkId[substr1+1]
-          numervalue1 = substr3
-         
-           }
-
-    def valor = ""
-    valor =   numervalue1 as Integer
-    relay = valor-1   
-
- ////
-     def stringrelay = relay   
-     def comando = "mdcmd_sendrele," +state.macaddress+ "," + stringrelay + ",0\r\n"
-     interfaces.rawSocket.sendMessage(comando)
-     log.info "Foi Desligado o Relay " + relay + " via TCP " + comando 
-     state.update = 1    //variable to control update with board on parse
-    
-}
-
-
-
-
-
-
-////////////////////////////////////////////////
-////////LOGGING
-///////////////////////////////////////////////
-
-
-private processEvent( Variable, Value ) {
-    if ( state."${ Variable }" != Value ) {
-        state."${ Variable }" = Value
-        logDebug( "Event: ${ Variable } = ${ Value }" )
-        sendEvent( name: "${ Variable }", value: Value, isStateChanged: true )
-    }
-}
-
-
-=======
 // ======== Logs ========
->>>>>>> 4d0a1935c409fb74df1ff9dd5615cffa1ab8b586
 
 def logsOff() {
   log.warn 'logging disabled...'
